@@ -2,29 +2,24 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: ["dev"]
+    branches: ["main", "dev"]
   pull_request:
     branches: ["main"]
 
 jobs:
-  build-test-scan:
+  # ============================================
+  # JOB 1 : Security scan (Trivy + Snyk + Gitleaks)
+  # Exécuté UNIQUEMENT sur main (push direct ou merge depuis dev)
+  # ============================================
+  security-scan:
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 #récupère tout l'historique git
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          fetch-depth: 0
 
       - name: Build Docker image
         run: docker build -t devsecure-api .
@@ -63,13 +58,98 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ============================================
+  # JOB 2 : Build & Push sur Docker Hub
+  # - Sur dev  : build + push tag "dev"
+  # - Sur main : build + push tag "latest" (attend security-scan)
+  # ============================================
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: [security-scan]
+    if: |
+      always() &&
+      (github.ref == 'refs/heads/dev' ||
+       (github.ref == 'refs/heads/main' && needs.security-scan.result == 'success'))
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build Docker image
+        run: docker build -t devsecure-api .
+
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Push image to Docker Hub
+      - name: Push image to Docker Hub (dev)
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          docker tag devsecure-api ${{ secrets.DOCKER_USERNAME }}/devsecure-api:dev
+          docker push ${{ secrets.DOCKER_USERNAME }}/devsecure-api:dev
+
+      - name: Push image to Docker Hub (latest)
+        if: github.ref == 'refs/heads/main'
         run: |
           docker tag devsecure-api ${{ secrets.DOCKER_USERNAME }}/devsecure-api:latest
           docker push ${{ secrets.DOCKER_USERNAME }}/devsecure-api:latest
+
+  # ============================================
+  # JOB 3 : Deploy sur le serveur (PROD)
+  # Uniquement sur main, après build-and-push
+  # Se connecte en SSH et pull + restart le container
+  # ============================================
+  deploy-prod:
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy to production server via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          script: |
+            docker pull ${{ secrets.DOCKER_USERNAME }}/devsecure-api:latest
+            docker stop devsecure-api-prod || true
+            docker rm devsecure-api-prod || true
+            docker run -d --name devsecure-api-prod -p 3000:3000 ${{ secrets.DOCKER_USERNAME }}/devsecure-api:latest
+
+  # ============================================
+  # JOB 4 : Deploy sur le serveur (DEV)
+  # Uniquement sur dev, après build-and-push
+  # Se connecte en SSH et pull + restart le container dev
+  # ============================================
+  deploy-dev:
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: github.ref == 'refs/heads/dev'
+
+    steps:
+      - name: Deploy to dev server via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          script: |
+            docker pull ${{ secrets.DOCKER_USERNAME }}/devsecure-api:dev
+            docker stop devsecure-api-dev || true
+            docker rm devsecure-api-dev || true
+            docker run -d --name devsecure-api-dev -p 3001:3000 ${{ secrets.DOCKER_USERNAME }}/devsecure-api:dev
