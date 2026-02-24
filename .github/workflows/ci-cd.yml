@@ -1,14 +1,13 @@
 name: CI/CD Pipeline
 
 on:
-  workflow_dispatch:
   push:
     branches: ["main", "dev"]
   pull_request:
     branches: ["main"]
 
 jobs:
-  
+
   security-scan:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
