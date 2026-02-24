@@ -8,6 +8,7 @@ on:
     branches: ["main"]
 
 jobs:
+  
   security-scan:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
